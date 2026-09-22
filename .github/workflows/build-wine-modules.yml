@@ -1,4 +1,4 @@
-name: Build patched Wine modules
+name: Build Wine modules
 
 on:
   workflow_dispatch:
@@ -15,12 +15,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     env:
-      # The container ships Wine 10.10; 10.11 is the first release with the
-      # quartz dynamic-format-change fix the intro videos need.
+      # The container ships Wine 10.10, whose dlls/quartz/avidec.c cannot handle a
+      # dynamic format change; 10.11 is the first release that can.
       WINE_TAG: ${{ github.event.inputs.wine_tag || 'wine-10.11' }}
 
     steps:
-      - name: Checkout patches
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install build dependencies
@@ -38,7 +38,6 @@ jobs:
           echo "--- versions ---"
           gcc --version | head -1
           i686-w64-mingw32-gcc --version | head -1
-          x86_64-w64-mingw32-gcc --version | head -1
           pkg-config --modversion gstreamer-1.0
 
       - name: Clone upstream Wine at ${{ github.event.inputs.wine_tag || 'wine-10.11' }}
@@ -47,30 +46,28 @@ jobs:
             https://github.com/wine-mirror/wine.git wine
           git -C wine log -1 --format='%H %s'
 
-      - name: Apply patches
+      - name: Apply patches (if any)
         run: |
+          shopt -s nullglob
+          found=0
           for p in patches/*.patch; do
             echo "== applying $p"
             git -C wine apply --verbose "../$p"
+            found=1
           done
-
-      - name: Gate 1 - patches are present in the tree
-        run: |
-          grep -q 'Handle it' wine/dlls/winegstreamer/quartz_parser.c
-          grep -q 'current_flags |= AM_SEEKING_NoFlush' wine/dlls/winegstreamer/quartz_parser.c
-          grep -q 'flags &= ~GST_SEEK_FLAG_FLUSH' wine/dlls/winegstreamer/wg_parser.c
-          echo "patch markers OK"
+          [ "$found" = 0 ] && echo "no patches - building pristine upstream"
+          exit 0
 
       - name: Configure
         working-directory: wine
         run: |
           ./configure --enable-archs=i386,x86_64 --disable-tests 2>&1 | tee ../configure.log
 
-      - name: Gate 2 - GStreamer support was detected
+      - name: Gate 1 - GStreamer support was detected
         run: |
-          # Match only GStreamer's own diagnostics. Wine warns "won't be
-          # supported" for every optional library it cannot find (Wayland,
-          # Vulkan, CUPS...), none of which matter for the modules we ship.
+          # Match only GStreamer's own diagnostics. Wine warns "won't be supported"
+          # for every optional library it cannot find (Wayland, Vulkan, CUPS...),
+          # none of which matter for the modules we ship.
           if grep -qi "gstreamer.*development files not found" configure.log; then
             echo "::error::configure did not find GStreamer development files"
             grep -i gstreamer configure.log || true
@@ -91,21 +88,26 @@ jobs:
         working-directory: wine
         run: make install DESTDIR="$GITHUB_WORKSPACE/stage"
 
-      - name: Collect the modules we replace
+      - name: Collect and strip the modules we replace
         run: |
           # Locate the installed wine tree rather than assuming libdir.
           SRC=$(dirname "$(find "$GITHUB_WORKSPACE/stage" -type d -name i386-windows | head -1)")
           test -n "$SRC" && test -d "$SRC" || { echo "::error::installed wine tree not found"; exit 1; }
           echo "wine tree: $SRC"
-          for f in i386-windows/winegstreamer.dll \
+          for f in i386-windows/quartz.dll \
+                   i386-windows/winegstreamer.dll \
                    x86_64-windows/winegstreamer.dll \
-                   x86_64-unix/winegstreamer.so \
-                   i386-windows/quartz.dll; do
+                   x86_64-unix/winegstreamer.so; do
             install -D "$SRC/$f" "out/lib/wine/$f"
           done
+          # Unstripped modules are 3-6x the size of the ones the container ships,
+          # and they go into an APK asset.
+          i686-w64-mingw32-strip   --strip-debug out/lib/wine/i386-windows/*.dll
+          x86_64-w64-mingw32-strip --strip-debug out/lib/wine/x86_64-windows/*.dll
+          strip --strip-debug out/lib/wine/x86_64-unix/winegstreamer.so
           find out -type f -printf '%10s  %p\n'
 
-      - name: Gate 3 - the unix module really links GStreamer
+      - name: Gate 2 - the unix module really links GStreamer
         run: |
           SO=out/lib/wine/x86_64-unix/winegstreamer.so
           readelf -d "$SO" | grep NEEDED
@@ -113,6 +115,14 @@ jobs:
             || { echo "::error::$SO is not linked against GStreamer"; exit 1; }
           echo "--- highest glibc symbol version required (container has 2.39) ---"
           readelf -V "$SO" | grep -o 'GLIBC_2\.[0-9.]*' | sort -uV | tail -3
+
+      - name: Gate 3 - the PE modules are loadable i386 DLLs
+        run: |
+          for f in out/lib/wine/i386-windows/*.dll; do
+            file "$f" | grep -q 'PE32 executable' \
+              || { echo "::error::$f is not a PE32 image"; exit 1; }
+            echo "OK $f"
+          done
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
