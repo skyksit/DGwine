@@ -1,0 +1,33 @@
+diff -u -r a/dlls/quartz/filtergraph.c b/dlls/quartz/filtergraph.c
+--- a/dlls/quartz/filtergraph.c	2026-09-22 17:16:46.543898000 +0900
++++ b/dlls/quartz/filtergraph.c	2026-09-22 17:16:46.544902300 +0900
+@@ -2447,6 +2447,29 @@
+ 
+     EnterCriticalSection(&graph->cs);
+ 
++    /* A request that moves nothing has nothing to do. Applications re-assert the
++     * position they already hold - a game keeping its loop end point set does it
++     * three times a second - and answering each one costs a full seek: the graph
++     * is paused, every filter is seeked, which flushes the pins and discards the
++     * samples already queued in the renderer, and the graph is run again. At that
++     * rate the audio stutters audibly. Measured in one such title: 144 of the
++     * 148 calls in 40 seconds asked for the stop position the graph already had. */
++    if ((current_flags & 0x7) == AM_SEEKING_NoPositioning)
++    {
++        LONGLONG stop_pos;
++
++        if ((stop_flags & 0x7) == AM_SEEKING_NoPositioning
++                || (stop_ptr && (stop_flags & 0x7) == AM_SEEKING_AbsolutePositioning
++                    && SUCCEEDED(MediaSeeking_GetStopPosition(iface, &stop_pos))
++                    && stop_pos == *stop_ptr))
++        {
++            if (current_ptr && (current_flags & AM_SEEKING_ReturnTime))
++                MediaSeeking_GetCurrentPosition(iface, current_ptr);
++            LeaveCriticalSection(&graph->cs);
++            return S_OK;
++        }
++    }
++
+     state = graph->state;
+     if (state == State_Running && !graph->needs_async_run)
+         IMediaControl_Pause(&graph->IMediaControl_iface);
