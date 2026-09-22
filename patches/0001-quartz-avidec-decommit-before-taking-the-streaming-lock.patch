@@ -1,0 +1,29 @@
+diff -u -r a/dlls/quartz/avidec.c b/dlls/quartz/avidec.c
+--- a/dlls/quartz/avidec.c	2026-09-22 16:24:00.384987100 +0900
++++ b/dlls/quartz/avidec.c	2026-09-22 16:24:00.384987100 +0900
+@@ -649,6 +649,16 @@
+     if (!filter->source.pin.peer)
+         return S_OK;
+ 
++    /* Decommit before taking stream_cs, not after. A streaming thread sits inside
++     * Receive holding stream_cs while it waits in the downstream allocator's
++     * GetBuffer for a sample to come back, and decommitting is the only thing that
++     * releases that wait: amstream's ddraw allocator sleeps on its allocator_cv,
++     * which stopping the renderer does not signal (that wakes update_queued_cv).
++     * Taking stream_cs first therefore blocks forever on the very thread this call
++     * was supposed to free - reachable in any amstream player that stops playback
++     * mid-stream, e.g. a game skipping its intro video. */
++    IMemAllocator_Decommit(filter->source.pAllocator);
++
+     if (filter->hvid)
+     {
+         EnterCriticalSection(&filter->filter.stream_cs);
+@@ -661,8 +671,6 @@
+         }
+     }
+ 
+-    IMemAllocator_Decommit(filter->source.pAllocator);
+-
+     return S_OK;
+ }
+ 
