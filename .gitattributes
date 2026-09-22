@@ -1,0 +1,2 @@
+# The patch must stay LF or git apply fails on the Linux runner.
+* text=auto eol=lf

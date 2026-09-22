@@ -1,0 +1,111 @@
+name: Build patched Wine modules
+
+on:
+  workflow_dispatch:
+    inputs:
+      wine_tag:
+        description: 'Upstream Wine tag to build'
+        required: true
+        default: 'wine-10.11'
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      # The container ships Wine 10.10; 10.11 is the first release with the
+      # quartz dynamic-format-change fix the intro videos need.
+      WINE_TAG: ${{ github.event.inputs.wine_tag || 'wine-10.11' }}
+
+    steps:
+      - name: Checkout patches
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential flex bison gperf pkg-config git ca-certificates \
+            gcc-mingw-w64 \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libfreetype-dev libfontconfig-dev libxml2-dev libssl-dev \
+            libx11-dev libxext-dev libxrandr-dev libxi-dev libxcursor-dev \
+            libxcomposite-dev libxinerama-dev libxfixes-dev libxrender-dev \
+            libgl-dev libglu1-mesa-dev libosmesa6-dev \
+            libasound2-dev libpulse-dev libudev-dev libusb-1.0-0-dev
+          echo "--- versions ---"
+          gcc --version | head -1
+          i686-w64-mingw32-gcc --version | head -1
+          x86_64-w64-mingw32-gcc --version | head -1
+          pkg-config --modversion gstreamer-1.0
+
+      - name: Clone upstream Wine at ${{ github.event.inputs.wine_tag || 'wine-10.11' }}
+        run: |
+          git clone --depth 1 --branch "$WINE_TAG" \
+            https://github.com/wine-mirror/wine.git wine
+          git -C wine log -1 --format='%H %s'
+
+      - name: Apply patches
+        run: |
+          for p in patches/*.patch; do
+            echo "== applying $p"
+            git -C wine apply --verbose "../$p"
+          done
+
+      - name: Gate 1 - patches are present in the tree
+        run: |
+          grep -q 'Handle it' wine/dlls/winegstreamer/quartz_parser.c
+          grep -q 'current_flags |= AM_SEEKING_NoFlush' wine/dlls/winegstreamer/quartz_parser.c
+          grep -q 'flags &= ~GST_SEEK_FLAG_FLUSH' wine/dlls/winegstreamer/wg_parser.c
+          echo "patch markers OK"
+
+      - name: Configure
+        working-directory: wine
+        run: |
+          ./configure --enable-archs=i386,x86_64 --disable-tests 2>&1 | tee ../configure.log
+
+      - name: Gate 2 - GStreamer support was detected
+        run: |
+          if grep -qi "gstreamer.*not found\|won't be supported" configure.log; then
+            echo "::error::configure did not find GStreamer development files"
+            grep -i gstreamer configure.log || true
+            exit 1
+          fi
+          echo "GStreamer detected"
+
+      - name: Build
+        working-directory: wine
+        run: make -j"$(nproc)"
+
+      - name: Install into a staging tree
+        working-directory: wine
+        run: make install DESTDIR="$GITHUB_WORKSPACE/stage"
+
+      - name: Collect the modules we replace
+        run: |
+          SRC="$GITHUB_WORKSPACE/stage/usr/local/lib/wine"
+          for f in i386-windows/winegstreamer.dll \
+                   x86_64-windows/winegstreamer.dll \
+                   x86_64-unix/winegstreamer.so \
+                   i386-windows/quartz.dll; do
+            install -D "$SRC/$f" "out/lib/wine/$f"
+          done
+          find out -type f -printf '%10s  %p\n'
+
+      - name: Gate 3 - the unix module really links GStreamer
+        run: |
+          SO=out/lib/wine/x86_64-unix/winegstreamer.so
+          readelf -d "$SO" | grep NEEDED
+          readelf -d "$SO" | grep -q 'libgstreamer-1.0.so.0' \
+            || { echo "::error::$SO is not linked against GStreamer"; exit 1; }
+          echo "--- highest glibc symbol version required (container has 2.39) ---"
+          readelf -V "$SO" | grep -o 'GLIBC_2\.[0-9.]*' | sort -uV | tail -3
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wine-modules-${{ github.event.inputs.wine_tag || 'wine-10.11' }}
+          path: out/
+          if-no-files-found: error
