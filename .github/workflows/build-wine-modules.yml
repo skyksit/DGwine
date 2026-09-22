@@ -68,8 +68,16 @@ jobs:
 
       - name: Gate 2 - GStreamer support was detected
         run: |
-          if grep -qi "gstreamer.*not found\|won't be supported" configure.log; then
+          # Match only GStreamer's own diagnostics. Wine warns "won't be
+          # supported" for every optional library it cannot find (Wayland,
+          # Vulkan, CUPS...), none of which matter for the modules we ship.
+          if grep -qi "gstreamer.*development files not found" configure.log; then
             echo "::error::configure did not find GStreamer development files"
+            grep -i gstreamer configure.log || true
+            exit 1
+          fi
+          if ! grep -q 'gst_pad_new in -lgstreamer-1.0\.\.\. yes' configure.log; then
+            echo "::error::configure did not link-test GStreamer successfully"
             grep -i gstreamer configure.log || true
             exit 1
           fi
@@ -85,7 +93,10 @@ jobs:
 
       - name: Collect the modules we replace
         run: |
-          SRC="$GITHUB_WORKSPACE/stage/usr/local/lib/wine"
+          # Locate the installed wine tree rather than assuming libdir.
+          SRC=$(dirname "$(find "$GITHUB_WORKSPACE/stage" -type d -name i386-windows | head -1)")
+          test -n "$SRC" && test -d "$SRC" || { echo "::error::installed wine tree not found"; exit 1; }
+          echo "wine tree: $SRC"
           for f in i386-windows/winegstreamer.dll \
                    x86_64-windows/winegstreamer.dll \
                    x86_64-unix/winegstreamer.so \
