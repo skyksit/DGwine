@@ -76,7 +76,11 @@ jobs:
 
       - name: Configure
         working-directory: wine
-        run: ./configure --enable-archs=i386,x86_64 --disable-tests 2>&1 | tee ../configure.log
+        # --without-unwind is not optional here. This runner has libunwind-dev, Winlator's build
+        # machine evidently did not, and configure links ntdll.so against whichever unwinder it
+        # finds. The container ships no libunwind at all, so an ntdll.so that needs it fails to
+        # dlopen and every session dies at startup - Gate 4 below is the cheap check for that.
+        run: ./configure --enable-archs=i386,x86_64 --disable-tests --without-unwind 2>&1 | tee ../configure.log
 
       - name: Build
         working-directory: wine
@@ -139,6 +143,23 @@ jobs:
           echo "--- highest glibc symbol version required (container has 2.39) ---"
           readelf -V out/lib/wine/x86_64-unix/ntdll.so | grep -o 'GLIBC_2\.[0-9.]*' | sort -uV | tail -3
           readelf -V out/bin/wineserver | grep -o 'GLIBC_2\.[0-9.]*' | sort -uV | tail -3
+
+      - name: Gate 4 - nothing needs a library the container does not ship
+        run: |
+          # The container's rootfs is a fixed set of libraries. A module that picked up an extra
+          # dependency on this runner cannot be dlopen'd there, and the only symptom is that every
+          # session exits at startup. The original modules need exactly libc and libgcc_s.
+          ALLOWED='libc.so.6 libgcc_s.so.1 libm.so.6 libpthread.so.0 libdl.so.2 librt.so.1'
+          fail=0
+          for f in out/lib/wine/x86_64-unix/ntdll.so out/bin/wineserver; do
+            for dep in $(readelf -d "$f" | sed -n 's/.*NEEDED.*\[\(.*\)\]/\1/p'); do
+              case " $ALLOWED " in
+                *" $dep "*) echo "OK   $f -> $dep" ;;
+                *) echo "::error::$f needs $dep, which the container does not ship"; fail=1 ;;
+              esac
+            done
+          done
+          exit $fail
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
