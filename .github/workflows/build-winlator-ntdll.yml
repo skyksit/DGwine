@@ -1,0 +1,148 @@
+name: Build Winlator ntdll (game speed)
+
+# Separate from "Build Wine modules" on purpose: that one builds **upstream** Wine, this one cannot.
+# The container's Wine carries esync, which has never been upstream in any release, and ntdll is the
+# syscall boundary - an upstream-built one would drop esync and would not speak the same protocol as
+# the container's wineserver. So the base here is Winlator's own tree.
+#
+# Manual only. A full build is ~35 min and nothing in this repo should trigger it by accident.
+
+on:
+  workflow_dispatch:
+    inputs:
+      wine_repo:
+        description: 'Wine source repository (owner/name)'
+        required: true
+        default: 'brunodev85/wine-10.10-custom'
+      wine_ref:
+        description: 'Branch or tag in that repository'
+        required: true
+        default: 'main'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      WINE_REPO: ${{ github.event.inputs.wine_repo }}
+      WINE_REF: ${{ github.event.inputs.wine_ref }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential flex bison gperf pkg-config git ca-certificates \
+            gcc-mingw-w64 \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libfreetype-dev libfontconfig-dev libxml2-dev libssl-dev \
+            libx11-dev libxext-dev libxrandr-dev libxi-dev libxcursor-dev \
+            libxcomposite-dev libxinerama-dev libxfixes-dev libxrender-dev \
+            libgl-dev libglu1-mesa-dev libosmesa6-dev \
+            libasound2-dev libpulse-dev libudev-dev libusb-1.0-0-dev
+          echo "--- versions ---"
+          gcc --version | head -1
+          x86_64-w64-mingw32-gcc --version | head -1
+
+      - name: Clone ${{ github.event.inputs.wine_repo }} at ${{ github.event.inputs.wine_ref }}
+        run: |
+          git clone --depth 1 --branch "$WINE_REF" \
+            "https://github.com/$WINE_REPO.git" wine
+          git -C wine log -1 --format='%H %s'
+
+      - name: Gate 0 - the base tree really has esync
+        run: |
+          # If this ever fails the base is wrong, and everything below would silently produce an
+          # ntdll that cannot talk to the container's wineserver.
+          test -f wine/dlls/ntdll/unix/esync.c \
+            || { echo "::error::$WINE_REPO has no dlls/ntdll/unix/esync.c - wrong base tree"; exit 1; }
+          test -f wine/server/esync.c \
+            || { echo "::error::$WINE_REPO has no server/esync.c - wrong base tree"; exit 1; }
+          echo "esync present"
+
+      - name: Apply patches
+        run: |
+          shopt -s nullglob
+          found=0
+          for p in patches-winlator/*.patch; do
+            echo "== applying $p"
+            git -C wine apply --verbose "../$p"
+            found=1
+          done
+          [ "$found" = 1 ] || { echo "::error::no patches in patches-winlator/"; exit 1; }
+
+      - name: Configure
+        working-directory: wine
+        run: ./configure --enable-archs=i386,x86_64 --disable-tests 2>&1 | tee ../configure.log
+
+      - name: Build
+        working-directory: wine
+        run: make -j"$(nproc)"
+
+      - name: Install into a staging tree
+        working-directory: wine
+        run: make install DESTDIR="$GITHUB_WORKSPACE/stage"
+
+      - name: Collect and strip the modules we replace
+        run: |
+          # ntdll's PE and unix halves are one unit - the syscall numbers in the PE stubs have to
+          # match the unix dispatcher - and wineserver comes along because it shares the esync
+          # protocol with them. Everything else in the container imports ntdll by name and is
+          # unaffected.
+          SRC=$(dirname "$(find "$GITHUB_WORKSPACE/stage" -type d -name i386-windows | head -1)")
+          test -n "$SRC" && test -d "$SRC" || { echo "::error::installed wine tree not found"; exit 1; }
+          echo "wine tree: $SRC"
+          for f in i386-windows/ntdll.dll \
+                   x86_64-windows/ntdll.dll \
+                   x86_64-unix/ntdll.so; do
+            install -D "$SRC/$f" "out/lib/wine/$f"
+          done
+
+          SERVER=$(find "$GITHUB_WORKSPACE/stage" -type f -name wineserver | head -1)
+          test -n "$SERVER" || { echo "::error::wineserver not found in the staging tree"; exit 1; }
+          install -D "$SERVER" out/bin/wineserver
+
+          # Unstripped modules are several times the size of the ones the container ships, and they
+          # go into an APK asset.
+          i686-w64-mingw32-strip   --strip-debug out/lib/wine/i386-windows/ntdll.dll
+          x86_64-w64-mingw32-strip --strip-debug out/lib/wine/x86_64-windows/ntdll.dll
+          strip --strip-debug out/lib/wine/x86_64-unix/ntdll.so
+          strip --strip-debug out/bin/wineserver
+          find out -type f -printf '%10s  %p\n'
+
+      - name: Gate 1 - the game-speed patch is actually in the binary
+        run: |
+          # The one string the patch is guaranteed to leave behind: the env var it looks up.
+          for f in out/lib/wine/x86_64-unix/ntdll.so; do
+            grep -aq 'WINRUNNER_TIMESCALE_FILE' "$f" \
+              || { echo "::error::$f does not contain WINRUNNER_TIMESCALE_FILE - patch did not land"; exit 1; }
+            echo "OK $f"
+          done
+
+      - name: Gate 2 - esync survived the build
+        run: |
+          for f in out/lib/wine/x86_64-unix/ntdll.so out/bin/wineserver; do
+            grep -aq 'WINEESYNC' "$f" \
+              || { echo "::error::$f lost esync - it will not match the container"; exit 1; }
+            echo "OK $f"
+          done
+
+      - name: Gate 3 - the PE modules are loadable images
+        run: |
+          file out/lib/wine/i386-windows/ntdll.dll   | grep -q 'PE32 executable' \
+            || { echo "::error::i386 ntdll.dll is not a PE32 image"; exit 1; }
+          file out/lib/wine/x86_64-windows/ntdll.dll | grep -q 'PE32+ executable' \
+            || { echo "::error::x86_64 ntdll.dll is not a PE32+ image"; exit 1; }
+          echo "--- highest glibc symbol version required (container has 2.39) ---"
+          readelf -V out/lib/wine/x86_64-unix/ntdll.so | grep -o 'GLIBC_2\.[0-9.]*' | sort -uV | tail -3
+          readelf -V out/bin/wineserver | grep -o 'GLIBC_2\.[0-9.]*' | sort -uV | tail -3
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: winlator-ntdll-timescale
+          path: out/
+          if-no-files-found: error

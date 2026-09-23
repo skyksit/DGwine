@@ -78,3 +78,56 @@ such seek. **It was wrong twice over and has been removed.**
    which froze the game as soon as Wine's splitter was finally in the audio path.
 
 Any patch that forces `AM_SEEKING_NoFlush` on that path reproduces the deadlock.
+
+## Game speed: a second series, on a different base
+
+`patches-winlator/` and the **Build Winlator ntdll (game speed)** workflow are a
+separate track from everything above, because they cannot build on upstream Wine.
+
+WinRunner can now fast-forward and slow-motion a game. Wine is not an emulator, so
+there is no core loop to run more or fewer times; the only lever is the clock the
+game reads. The Android side publishes a scale into a small mmap'd file and the
+patch makes ntdll derive its clock from it — which covers
+`QueryPerformanceCounter`, `timeGetTime` (winmm builds it on QPC), `Sleep` and
+every wait timeout. `GetTickCount` is *not* covered: it reads
+`user_shared_data->TickCount`, which wineserver writes.
+
+### Why it cannot use upstream
+
+The container sets `WINEESYNC=1` on every session, and **esync has never been in
+any upstream Wine release** — not 10.10, not master (whose answer is the in-kernel
+`ntsync` driver instead), and not in current wine-staging either. The shipped
+`ntdll.so` carries `WINEESYNC`×4 and the shipped `wineserver` `esync`×45, so the
+rootfs is definitively an esync build.
+
+`quartz.dll` got away with a cross-version swap because it is a leaf module. ntdll
+is the syscall boundary: an upstream-built one would drop esync and would not
+speak the same protocol as the container's wineserver. The base is therefore
+Winlator's own tree, [`brunodev85/wine-10.10-custom`](https://github.com/brunodev85/wine-10.10-custom),
+which carries esync and matches the container's version. Gate 0 fails the build if
+that tree ever stops having it.
+
+Its four stock call sites are byte-identical to upstream 10.10; `esync.c` adds a
+fifth hunk, and missing it would leave every esync wait at 1x while the rest of
+the clock ran scaled.
+
+### Output
+
+```
+lib/wine/i386-windows/ntdll.dll
+lib/wine/x86_64-windows/ntdll.dll
+lib/wine/x86_64-unix/ntdll.so
+bin/wineserver
+```
+
+ntdll's two halves are one unit — the syscall numbers in the PE stubs have to match
+the unix dispatcher — and `wineserver` ships with them because it shares the esync
+protocol. Everything else in the container imports ntdll by name and is unaffected.
+
+### The gate that matters
+
+Not "does 9x work" but **"is 1x still identical"**. With no mapping file every
+helper falls back to the same clock (`CLOCK_MONOTONIC_RAW` first) and the same
+arithmetic as the unpatched code, so a 1x regression means the swap itself is
+wrong — most likely the rootfs was built from a different revision of the base
+tree than the one CI used.
