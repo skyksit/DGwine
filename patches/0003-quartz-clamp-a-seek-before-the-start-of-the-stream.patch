@@ -1,0 +1,19 @@
+diff --git a/dlls/quartz/filtergraph.c b/dlls/quartz/filtergraph.c
+index c2b9b46..0cc1d23 100644
+--- a/dlls/quartz/filtergraph.c
++++ b/dlls/quartz/filtergraph.c
+@@ -2478,6 +2478,14 @@ static HRESULT WINAPI MediaSeeking_SetPositions(IMediaSeeking *iface, LONGLONG *
+     {
+         LONGLONG current = current_ptr ? *current_ptr : 0, stop = stop_ptr ? *stop_ptr : 0;
+ 
++        /* A stream has no position before its start. Applications seek slightly
++         * before zero - a 1998 title rewinds its intro video to -0.16 s - and the
++         * parser hands the value to GStreamer as an unsigned clock time, which
++         * lands at the end of the file: the video then waits 24 seconds for its
++         * first frame and plays as a black screen. Start from the beginning. */
++        if ((current_flags & 0x7) == AM_SEEKING_AbsolutePositioning && current < 0)
++            current = 0;
++
+         update_seeking(filter);
+         if (!filter->seeking)
+             continue;
