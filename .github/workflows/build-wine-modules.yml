@@ -95,6 +95,8 @@ jobs:
           test -n "$SRC" && test -d "$SRC" || { echo "::error::installed wine tree not found"; exit 1; }
           echo "wine tree: $SRC"
           for f in i386-windows/quartz.dll \
+                   i386-windows/gdiplus.dll \
+                   x86_64-windows/gdiplus.dll \
                    i386-windows/winegstreamer.dll \
                    x86_64-windows/winegstreamer.dll \
                    x86_64-unix/winegstreamer.so; do

@@ -1,0 +1,79 @@
+diff --git a/dlls/gdiplus/font.c b/dlls/gdiplus/font.c
+index 5daa910..5400a3d 100644
+--- a/dlls/gdiplus/font.c
++++ b/dlls/gdiplus/font.c
+@@ -601,6 +601,12 @@ GpStatus WINGDIPAPI GdipGetFontHeightGivenDPI(GDIPCONST GpFont *font, REAL dpi,
+     return Ok;
+ }
+ 
++struct installed_font
++{
++    LOGFONTW lf;                /* lfFaceName holds the full name */
++    WCHAR family[LF_FACESIZE];  /* the family name as enumerated */
++};
++
+ /***********************************************************************
+  * Borrowed from GDI32:
+  *
+@@ -611,14 +617,15 @@ static INT CALLBACK is_font_installed_proc(const LOGFONTW *elf,
+                             const TEXTMETRICW *ntm, DWORD type, LPARAM lParam)
+ {
+     const ENUMLOGFONTW *elfW = (const ENUMLOGFONTW *)elf;
+-    LOGFONTW *lf = (LOGFONTW *)lParam;
++    struct installed_font *found = (struct installed_font *)lParam;
+ 
+     if (type & RASTER_FONTTYPE)
+         return 1;
+ 
+-    *lf = *elf;
++    found->lf = *elf;
++    lstrcpynW(found->family, elf->lfFaceName, LF_FACESIZE);
+     /* replace substituted font name by a real one */
+-    lstrcpynW(lf->lfFaceName, elfW->elfFullName, LF_FACESIZE);
++    lstrcpynW(found->lf.lfFaceName, elfW->elfFullName, LF_FACESIZE);
+     return 0;
+ }
+ 
+@@ -703,7 +710,7 @@ GpStatus WINGDIPAPI GdipCreateFontFamilyFromName(GDIPCONST WCHAR *name,
+                                         GpFontFamily **family)
+ {
+     HDC hdc;
+-    LOGFONTW lf;
++    struct installed_font found;
+     GpStatus status;
+     int i;
+ 
+@@ -722,17 +729,31 @@ GpStatus WINGDIPAPI GdipCreateFontFamilyFromName(GDIPCONST WCHAR *name,
+ 
+     hdc = CreateCompatibleDC(0);
+ 
+-    if (!EnumFontFamiliesW(hdc, name, is_font_installed_proc, (LPARAM)&lf))
++    if (!EnumFontFamiliesW(hdc, name, is_font_installed_proc, (LPARAM)&found))
+     {
+         for (i = 0; i < collection->count; i++)
+         {
+-            if (!wcsicmp(lf.lfFaceName, collection->FontFamilies[i]->FamilyName))
++            if (!wcsicmp(found.lf.lfFaceName, collection->FontFamilies[i]->FamilyName))
+             {
+                 status = GdipCloneFontFamily(collection->FontFamilies[i], family);
+                 TRACE("<-- %p\n", *family);
+                 break;
+             }
+         }
++
++        /* The full name equals the family name only when the regular face is
++         * named after its family. Many fonts call it "<family> Regular" - all
++         * of Noto CJK does - and the collection is keyed by family, so such a
++         * family can never be found by its full name and every font created
++         * from it fails. Fall back to the enumerated family name. */
++        for (i = 0; status == FontFamilyNotFound && i < collection->count; i++)
++        {
++            if (!wcsicmp(found.family, collection->FontFamilies[i]->FamilyName))
++            {
++                status = GdipCloneFontFamily(collection->FontFamilies[i], family);
++                TRACE("%s by family name <-- %p\n", debugstr_w(found.family), *family);
++            }
++        }
+     }
+ 
+     DeleteDC(hdc);

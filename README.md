@@ -31,12 +31,20 @@ A tree that maps 1:1 onto the container's Wine install:
 
 ```
 lib/wine/i386-windows/quartz.dll
+lib/wine/i386-windows/gdiplus.dll
+lib/wine/x86_64-windows/gdiplus.dll
 lib/wine/i386-windows/winegstreamer.dll
 lib/wine/x86_64-windows/winegstreamer.dll
 lib/wine/x86_64-unix/winegstreamer.so
 ```
 
-Only `quartz.dll` is currently swapped in production; the `winegstreamer` modules
+`gdiplus.dll` carries patch 0004. Wine looked a family up by the font's *full*
+name, so a family whose regular face is called "<family> Regular" - every Android
+Noto CJK font the container sees through `/system/fonts` - could never be found:
+`GdipCreateFontFromLogfont` returned no font and the game drew no text at all
+(Dawn of Kagura's message window). Like quartz it is a leaf PE module.
+
+Only `quartz.dll` and `gdiplus.dll` are swapped in production; the `winegstreamer` modules
 are built so the whole DirectShow stack can be moved to one version if it ever
 becomes necessary.
 
