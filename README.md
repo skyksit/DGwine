@@ -44,9 +44,21 @@ Noto CJK font the container sees through `/system/fonts` - could never be found:
 `GdipCreateFontFromLogfont` returned no font and the game drew no text at all
 (Dawn of Kagura's message window). Like quartz it is a leaf PE module.
 
-Only `quartz.dll` and `gdiplus.dll` are swapped in production; the `winegstreamer` modules
-are built so the whole DirectShow stack can be moved to one version if it ever
-becomes necessary.
+The `winegstreamer` modules carry patches 0005–0007, upstream commits `5feec037`,
+`e5d435e3` and `ef50cbd6` (December 2025, tests dropped) backported onto 10.11.
+Before them the DirectShow MPEG Video Decoder (`quartz_transform.c`, byte-identical
+in 10.10 and 10.11) ignored a *dynamic* format change: when a game plays an MPEG-1
+through `amstream` into a DirectDraw surface, the graph first connects at RGB24
+and the game then calls `IDirectDrawMediaStream::SetFormat` for its 32bpp surface.
+amstream sees the decoder `QueryAccept` RGB32, so instead of reconnecting it hands
+the new type to the decoder through `IMediaSample::GetMediaType` on the output
+buffer — which the decoder never read, so it kept writing 24bpp rows into a 32bpp
+surface and the picture came out sheared (Shogun: Total War's SEGA logo). The
+patched decoder recreates its transform when the output sample's type changes.
+
+The three winegstreamer files are one unit — the PE module calls the unix module
+through `unixlib.h`, which is identical in 10.10 and 10.11, but they must still come
+from the same build. Swap all three together with `quartz.dll` and `gdiplus.dll`.
 
 ## Build environment
 
