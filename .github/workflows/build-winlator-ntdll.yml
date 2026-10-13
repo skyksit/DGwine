@@ -40,8 +40,9 @@ jobs:
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             libfreetype-dev libfontconfig-dev libxml2-dev libssl-dev \
             libx11-dev libxext-dev libxrandr-dev libxi-dev libxcursor-dev \
-            libxcomposite-dev libxinerama-dev libxfixes-dev libxrender-dev \
+            libxcomposite-dev libxfixes-dev libxrender-dev \
             libgl-dev libglu1-mesa-dev libosmesa6-dev \
+            libvulkan-dev libxxf86vm-dev \
             libasound2-dev libpulse-dev libudev-dev libusb-1.0-0-dev
           echo "--- versions ---"
           gcc --version | head -1
@@ -135,6 +136,13 @@ jobs:
           # The TRACE format string patch 0002 adds; TRACE strings survive --strip-debug.
           grep -aq 'keysym %lx -> %s' out/lib/wine/x86_64-unix/winex11.so \
             || { echo "::error::winex11.so does not contain the patch 0002 trace string"; exit 1; }
+          # The container's winex11.so has Vulkan (DXVK presents through vkCreateXlibSurfaceKHR) and
+          # XF86VidMode. Without libvulkan-dev configure silently drops Vulkan and the result renders
+          # nothing: Diablo II played sound over a black screen. Fail instead.
+          for sym in vkCreateXlibSurfaceKHR libvulkan libXxf86vm; do
+            grep -aq "$sym" out/lib/wine/x86_64-unix/winex11.so \
+              || { echo "::error::winex11.so lacks $sym - a feature the shipped one has"; exit 1; }
+          done
           echo "OK winex11.so"
 
       - name: Gate 2 - esync survived the build
