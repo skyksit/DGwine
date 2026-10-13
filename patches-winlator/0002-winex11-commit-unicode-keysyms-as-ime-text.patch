@@ -34,10 +34,10 @@ index aa7ce8f..f750517 100755
  extern void xim_set_focus( HWND hwnd, BOOL focus );
  
 diff --git a/dlls/winex11.drv/xim.c b/dlls/winex11.drv/xim.c
-index ef09356..07f18c2 100755
+index ef09356..658ef2f 100755
 --- a/dlls/winex11.drv/xim.c
 +++ b/dlls/winex11.drv/xim.c
-@@ -118,6 +118,35 @@ void xim_set_result_string( HWND hwnd, const char *str, UINT count )
+@@ -118,6 +118,34 @@ void xim_set_result_string( HWND hwnd, const char *str, UINT count )
      free( output );
  }
  
@@ -65,8 +65,7 @@ index ef09356..07f18c2 100755
 +        str[1] = 0;
 +    }
 +
-+    TRACE( "hwnd %p, keysym %lx -> %s
-+", hwnd, keysym, debugstr_w(str) );
++    TRACE( "hwnd %p, keysym %lx -> %s\n", hwnd, keysym, debugstr_w(str) );
 +    post_ime_update( hwnd, 0, NULL, str );
 +}
 +
