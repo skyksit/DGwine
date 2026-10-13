@@ -1,0 +1,75 @@
+diff --git a/dlls/winex11.drv/keyboard.c b/dlls/winex11.drv/keyboard.c
+index ba52f00..f4eb2fe 100755
+--- a/dlls/winex11.drv/keyboard.c
++++ b/dlls/winex11.drv/keyboard.c
+@@ -1381,6 +1381,18 @@ BOOL X11DRV_KeyEvent( HWND hwnd, XEvent *xev )
+         return TRUE;
+     }
+ 
++    /* WinRunner: a Unicode keysym beyond Latin-1 that X could not turn into text (no XKB, no input
++     * method in the container) has no vkey either, so it would be dropped below. Commit it as IME
++     * text instead - this is how the host's soft keyboard delivers Hangul and other non-Latin text. */
++    if (event->type == KeyPress && ascii_chars <= 0 &&
++        (keysym & 0xff000000) == 0x01000000 && (keysym & 0x00ffffff) > 0xff)
++    {
++        if (buf != Str)
++            free( Str );
++        xim_commit_unicode_keysym( hwnd, keysym );
++        return TRUE;
++    }
++
+     pthread_mutex_lock( &kbd_mutex );
+ 
+     AltGrMask = event->state & (0x6000 | Mod1Mask | Mod2Mask | Mod3Mask | Mod4Mask | Mod5Mask);
+diff --git a/dlls/winex11.drv/x11drv.h b/dlls/winex11.drv/x11drv.h
+index aa7ce8f..f750517 100755
+--- a/dlls/winex11.drv/x11drv.h
++++ b/dlls/winex11.drv/x11drv.h
+@@ -886,6 +886,7 @@ extern BOOL xim_init( const WCHAR *input_style );
+ extern void xim_thread_attach( struct x11drv_thread_data *data );
+ extern BOOL xim_in_compose_mode(void);
+ extern void xim_set_result_string( HWND hwnd, const char *str, UINT count );
++extern void xim_commit_unicode_keysym( HWND hwnd, KeySym keysym );
+ extern XIC X11DRV_get_ic( HWND hwnd );
+ extern void xim_set_focus( HWND hwnd, BOOL focus );
+ 
+diff --git a/dlls/winex11.drv/xim.c b/dlls/winex11.drv/xim.c
+index ef09356..07f18c2 100755
+--- a/dlls/winex11.drv/xim.c
++++ b/dlls/winex11.drv/xim.c
+@@ -118,6 +118,35 @@ void xim_set_result_string( HWND hwnd, const char *str, UINT count )
+     free( output );
+ }
+ 
++/* WinRunner: commit the character a Unicode keysym (0x01000000 | code point) stands for, as an IME
++ * result. The container's X server has no XKB extension and no input method, so XLookupString()
++ * returns no text for these keysyms and the key event would otherwise be dropped (no vkey). Going
++ * through the IME, as an XIM commit would, reaches games that read text with
++ * ImmGetCompositionString (Diablo II takes Korean only that way) as well as plain WM_CHAR ones. */
++void xim_commit_unicode_keysym( HWND hwnd, KeySym keysym )
++{
++    unsigned int cp = keysym & 0x00ffffff;
++    WCHAR str[3];
++
++    if (cp >= 0x110000) return;
++    if (cp >= 0x10000)
++    {
++        cp -= 0x10000;
++        str[0] = 0xd800 | (cp >> 10);
++        str[1] = 0xdc00 | (cp & 0x3ff);
++        str[2] = 0;
++    }
++    else
++    {
++        str[0] = cp;
++        str[1] = 0;
++    }
++
++    TRACE( "hwnd %p, keysym %lx -> %s
++", hwnd, keysym, debugstr_w(str) );
++    post_ime_update( hwnd, 0, NULL, str );
++}
++
+ static BOOL xic_preedit_state_notify( XIC xic, XPointer user, XPointer arg )
+ {
+     XIMPreeditStateNotifyCallbackStruct *params = (void *)arg;

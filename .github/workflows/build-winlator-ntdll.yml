@@ -1,4 +1,4 @@
-name: Build Winlator ntdll (game speed)
+name: Build Winlator ntdll (game speed) + winex11 (Unicode text)
 
 # Separate from "Build Wine modules" on purpose: that one builds **upstream** Wine, this one cannot.
 # The container's Wine carries esync, which has never been upstream in any release, and ntdll is the
@@ -99,9 +99,12 @@ jobs:
           SRC=$(dirname "$(find "$GITHUB_WORKSPACE/stage" -type d -name i386-windows | head -1)")
           test -n "$SRC" && test -d "$SRC" || { echo "::error::installed wine tree not found"; exit 1; }
           echo "wine tree: $SRC"
+          # winex11.so carries patch 0002 (Unicode keysyms committed as IME text). Only its unix half
+          # changes - no new unixlib entry points - so the container's PE winex11.drv stays as is.
           for f in i386-windows/ntdll.dll \
                    x86_64-windows/ntdll.dll \
-                   x86_64-unix/ntdll.so; do
+                   x86_64-unix/ntdll.so \
+                   x86_64-unix/winex11.so; do
             install -D "$SRC/$f" "out/lib/wine/$f"
           done
 
@@ -114,6 +117,7 @@ jobs:
           i686-w64-mingw32-strip   --strip-debug out/lib/wine/i386-windows/ntdll.dll
           x86_64-w64-mingw32-strip --strip-debug out/lib/wine/x86_64-windows/ntdll.dll
           strip --strip-debug out/lib/wine/x86_64-unix/ntdll.so
+          strip --strip-debug out/lib/wine/x86_64-unix/winex11.so
           strip --strip-debug out/bin/wineserver
           find out -type f -printf '%10s  %p\n'
 
@@ -125,6 +129,13 @@ jobs:
               || { echo "::error::$f does not contain WINRUNNER_TIMESCALE_FILE - patch did not land"; exit 1; }
             echo "OK $f"
           done
+
+      - name: Gate 1b - the Unicode-keysym patch is in winex11.so
+        run: |
+          # The TRACE format string patch 0002 adds; TRACE strings survive --strip-debug.
+          grep -aq 'keysym %lx -> %s' out/lib/wine/x86_64-unix/winex11.so \
+            || { echo "::error::winex11.so does not contain the patch 0002 trace string"; exit 1; }
+          echo "OK winex11.so"
 
       - name: Gate 2 - esync survived the build
         run: |
@@ -151,9 +162,12 @@ jobs:
           # session exits at startup. The original modules need exactly libc and libgcc_s.
           ALLOWED='libc.so.6 libgcc_s.so.1 libm.so.6 libpthread.so.0 libdl.so.2 librt.so.1'
           fail=0
-          for f in out/lib/wine/x86_64-unix/ntdll.so out/bin/wineserver; do
+          # winex11.so also links ntdll.so, win32u.so and the X client libraries (the shipped one: exactly those).
+          for f in out/lib/wine/x86_64-unix/ntdll.so out/bin/wineserver out/lib/wine/x86_64-unix/winex11.so; do
+            allowed="$ALLOWED"
+            case "$f" in *winex11.so) allowed="$ALLOWED ntdll.so win32u.so libX11.so.6 libXext.so.6" ;; esac
             for dep in $(readelf -d "$f" | sed -n 's/.*NEEDED.*\[\(.*\)\]/\1/p'); do
-              case " $ALLOWED " in
+              case " $allowed " in
                 *" $dep "*) echo "OK   $f -> $dep" ;;
                 *) echo "::error::$f needs $dep, which the container does not ship"; fail=1 ;;
               esac

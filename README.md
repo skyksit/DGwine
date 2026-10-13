@@ -151,3 +151,19 @@ helper falls back to the same clock (`CLOCK_MONOTONIC_RAW` first) and the same
 arithmetic as the unpatched code, so a 1x regression means the swap itself is
 wrong — most likely the rootfs was built from a different revision of the base
 tree than the one CI used.
+
+## winex11: Unicode keysyms committed as IME text (patches-winlator/0002)
+
+Built by `build-winlator-ntdll.yml` on Winlator's own tree, like the game-speed ntdll, and shipped as
+`lib/wine/x86_64-unix/winex11.so` only — the patch adds no unixlib entry point, so the container's PE
+`winex11.drv` stays.
+
+WinRunner's X server has no XKB extension and the container runs no input method, so libX11's
+`XLookupString()` returns no text for a Unicode keysym (`0x01000000 | code point`) beyond Latin-1.
+Such a key has no vkey either, and `X11DRV_KeyEvent` dropped it: Hangul typed on the Android soft
+keyboard never reached a game. The patch commits that character through `post_ime_update()` — the
+path an XIM commit takes — so it arrives as a real IME result (`WM_IME_COMPOSITION` with
+`GCS_RESULTSTR`, then `WM_IME_CHAR`/`WM_CHAR`).
+
+Going through the IME matters: Diablo II reads Korean only via `ImmGetCompositionStringA`. A bare
+`SendInput(KEYEVENTF_UNICODE)` reached its chat box as `WM_CHAR` and came out as `????`.
