@@ -56,6 +56,17 @@ buffer — which the decoder never read, so it kept writing 24bpp rows into a 32
 surface and the picture came out sheared (Shogun: Total War's SEGA logo). The
 patched decoder recreates its transform when the output sample's type changes.
 
+Patch 0008 is ours and goes the other way from the withdrawn patch below: a seek
+that moves the current position of a parser that is not stopped now always
+flushes, even when the caller passed `AM_SEEKING_NoFlush`. 창세기전3 파트1 pauses its
+MP3 music graph and rewinds it with `AbsolutePositioning|NoFlush` (0x21). Without a
+flush the streaming thread stays parked in `IMemAllocator_GetBuffer` on the paused
+renderer while holding `pin.flushing_cs`, and `GST_Seeking_SetPositions` waits for
+that lock forever — the game froze at a scene change, ESC and all. The same NoFlush
+rewind is harmless on a stopped graph (677 of them in one run), which takes the
+early `State_Stopped` return. A stop-only request keeps its NoFlush. Upstream master
+still has the unpatched code.
+
 The three winegstreamer files are one unit — the PE module calls the unix module
 through `unixlib.h`, which is identical in 10.10 and 10.11, but they must still come
 from the same build. Swap all three together with `quartz.dll` and `gdiplus.dll`.
@@ -98,6 +109,8 @@ such seek. **It was wrong twice over and has been removed.**
    which froze the game as soon as Wine's splitter was finally in the audio path.
 
 Any patch that forces `AM_SEEKING_NoFlush` on that path reproduces the deadlock.
+Patch 0008 closes the same deadlock from the other side, for applications that
+pass NoFlush themselves.
 
 ## Game speed: a second series, on a different base
 

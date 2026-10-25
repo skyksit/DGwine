@@ -1,0 +1,28 @@
+diff --git a/dlls/winegstreamer/quartz_parser.c b/dlls/winegstreamer/quartz_parser.c
+index ed3466e..b5e0233 100644
+--- a/dlls/winegstreamer/quartz_parser.c
++++ b/dlls/winegstreamer/quartz_parser.c
+@@ -2040,6 +2040,23 @@ static HRESULT WINAPI GST_Seeking_SetPositions(IMediaSeeking *iface,
+         return S_OK;
+     }
+ 
++    /* Moving the current position of a streaming parser without a flush can
++     * deadlock. The flushing locks below are held by the streaming threads while
++     * they deliver a sample, and a thread parked on a paused renderer - in
++     * IMemInputPin_Receive, or in IMemAllocator_GetBuffer once the renderer holds
++     * every buffer - only returns when downstream is flushed. With NoFlush nothing
++     * flushes it, so EnterCriticalSection(flushing_cs) waits forever. A game that
++     * pauses its music graph and rewinds it with AbsolutePositioning|NoFlush
++     * froze this way (Changsegijeon 3). Data already sent belongs to the old position
++     * anyway, so flush it. A request that only changes the stop position keeps
++     * its NoFlush. */
++    if ((current_flags & AM_SEEKING_NoFlush)
++            && (current_flags & AM_SEEKING_PositioningBitsMask) != AM_SEEKING_NoPositioning)
++    {
++        WARN("Ignoring AM_SEEKING_NoFlush for a seek of a running parser.\n");
++        current_flags &= ~AM_SEEKING_NoFlush;
++    }
++
+     if (!(current_flags & AM_SEEKING_NoFlush))
+     {
+         for (i = 0; i < filter->source_count; ++i)
