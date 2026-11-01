@@ -67,15 +67,18 @@ rewind is harmless on a stopped graph (677 of them in one run), which takes the
 early `State_Stopped` return. A stop-only request keeps its NoFlush. Upstream master
 still has the unpatched code.
 
-Patch 0009 is ours: the VMR-7 default presenter (`vmr7_presenter.c`) draws an RGB
-frame into its clipping window with `GetDC` + `StretchBlt` instead of blitting it to
-the primary surface. The blit made wined3d attach a GL drawable to the
-application's window, and releasing the presenter at the end of the movie destroyed
-it again (`release_gl_drawable destroying …` under `WINEDEBUG=+wgl`). Parfait
-~Chocolat second brew~ draws its own frames into that same window with GDI, so after
-its opening movie it kept running — it even replayed the movie as an attract demo a
-minute later — behind a black window. Non-RGB frames and any GDI failure still take
-the original primary-surface blit.
+Patch 0009 is ours: the VMR-7 default presenter (`vmr7_presenter.c`) draws frames
+into its clipping window with GDI instead of blitting them to the primary surface —
+RGB frames through `GetDC` + `StretchBlt`, YV12/I420/IYUV/YUY2/UYVY frames converted
+to RGB32 (BT.601) and drawn with `StretchDIBits`. Attaching the clipper to the
+primary made ddraw switch its swapchain to the application's window, so every blit
+attached a GL drawable to that window, and releasing the presenter at the end of the
+movie destroyed it again (`release_gl_drawable destroying …` under
+`WINEDEBUG=+wgl`). Parfait ~Chocolat second brew~ draws its own frames into the same
+window with GDI, so after its opening movie (MPEG-1, decoded to YV12) it kept
+running — it even replayed the movie as an attract demo a minute later — behind a
+black window. The clipper is now attached only when a frame has to fall back to the
+original primary-surface blit (another format, or a GDI failure).
 
 The three winegstreamer files are one unit — the PE module calls the unix module
 through `unixlib.h`, which is identical in 10.10 and 10.11, but they must still come

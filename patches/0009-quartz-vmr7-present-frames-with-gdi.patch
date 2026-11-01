@@ -1,0 +1,232 @@
+diff --git a/dlls/quartz/vmr7_presenter.c b/dlls/quartz/vmr7_presenter.c
+index c244c86..416cee0 100644
+--- a/dlls/quartz/vmr7_presenter.c
++++ b/dlls/quartz/vmr7_presenter.c
+@@ -35,6 +35,11 @@ struct vmr7_presenter
+     IDirectDrawSurface7 *frontbuffer;
+     IDirectDrawSurface7 *primary;
+     HWND window;
++    BOOL clipper_set;
++
++    /* RGB copy of a YUV frame, for drawing with GDI. */
++    DWORD *rgb;
++    DWORD rgb_width, rgb_height;
+ 
+     SIZE native_size, aspect_ratio;
+ };
+@@ -88,6 +93,7 @@ static ULONG WINAPI image_presenter_Release(IVMRImagePresenter *iface)
+             IDirectDrawSurface7_Release(presenter->frontbuffer);
+         IDirectDrawSurface7_Release(presenter->primary);
+         IDirectDraw7_Release(presenter->ddraw);
++        free(presenter->rgb);
+         free(presenter);
+     }
+     return refcount;
+@@ -105,6 +111,172 @@ static HRESULT WINAPI image_presenter_StopPresenting(IVMRImagePresenter *iface,
+     return E_NOTIMPL;
+ }
+ 
++/* Frames are drawn into the clipping window with GDI.
++ *
++ * Attaching a clipper to the primary surface makes ddraw switch its swapchain to
++ * the clipper's window, so blitting a frame to the primary attaches a GL drawable
++ * to the application's window, and releasing the presenter at the end of the
++ * movie destroys that drawable again. A game that draws its own frames into the
++ * same window with GDI is then left with a window that no longer shows anything:
++ * it keeps running behind a black screen (Parfait ~Chocolat second brew~ after
++ * its opening movie). GDI never touches the window's GL state. The clipper is
++ * only attached when a frame has to fall back to the primary-surface blit. */
++
++static inline BYTE clamp_byte(int v)
++{
++    return v < 0 ? 0 : v > 255 ? 255 : v;
++}
++
++static inline DWORD yuv_to_rgb(int y, int u, int v)
++{
++    int c = (y - 16) * 298, d = u - 128, e = v - 128;
++
++    return (clamp_byte((c + 409 * e + 128) >> 8) << 16)
++            | (clamp_byte((c - 100 * d - 208 * e + 128) >> 8) << 8)
++            | clamp_byte((c + 516 * d + 128) >> 8);
++}
++
++static BOOL convert_yuv_frame(struct vmr7_presenter *presenter, const DDSURFACEDESC2 *desc)
++{
++    DWORD fourcc = desc->ddpfPixelFormat.dwFourCC, width = desc->dwWidth, height = desc->dwHeight;
++    const BYTE *base = desc->lpSurface;
++    LONG pitch = desc->lPitch;
++    DWORD x, y;
++
++    if (presenter->rgb_width != width || presenter->rgb_height != height)
++    {
++        free(presenter->rgb);
++        if (!(presenter->rgb = malloc(width * height * sizeof(DWORD))))
++        {
++            presenter->rgb_width = presenter->rgb_height = 0;
++            return FALSE;
++        }
++        presenter->rgb_width = width;
++        presenter->rgb_height = height;
++    }
++
++    if (fourcc == MAKEFOURCC('Y','V','1','2') || fourcc == MAKEFOURCC('I','4','2','0')
++            || fourcc == MAKEFOURCC('I','Y','U','V'))
++    {
++        LONG chroma_pitch = pitch / 2;
++        const BYTE *first = base + pitch * height;
++        const BYTE *second = first + chroma_pitch * ((height + 1) / 2);
++        const BYTE *u_plane = fourcc == MAKEFOURCC('Y','V','1','2') ? second : first;
++        const BYTE *v_plane = fourcc == MAKEFOURCC('Y','V','1','2') ? first : second;
++
++        for (y = 0; y < height; ++y)
++        {
++            const BYTE *luma = base + pitch * y;
++            const BYTE *u_row = u_plane + chroma_pitch * (y / 2);
++            const BYTE *v_row = v_plane + chroma_pitch * (y / 2);
++            DWORD *out = presenter->rgb + width * y;
++
++            for (x = 0; x < width; ++x)
++                out[x] = yuv_to_rgb(luma[x], u_row[x / 2], v_row[x / 2]);
++        }
++        return TRUE;
++    }
++
++    if (fourcc == MAKEFOURCC('Y','U','Y','2') || fourcc == MAKEFOURCC('U','Y','V','Y'))
++    {
++        BOOL uyvy = fourcc == MAKEFOURCC('U','Y','V','Y');
++
++        for (y = 0; y < height; ++y)
++        {
++            const BYTE *row = base + pitch * y;
++            DWORD *out = presenter->rgb + width * y;
++
++            for (x = 0; x + 1 < width; x += 2, row += 4)
++            {
++                int y0 = uyvy ? row[1] : row[0], y1 = uyvy ? row[3] : row[2];
++                int u = uyvy ? row[0] : row[1], v = uyvy ? row[2] : row[3];
++
++                out[x] = yuv_to_rgb(y0, u, v);
++                out[x + 1] = yuv_to_rgb(y1, u, v);
++            }
++        }
++        return TRUE;
++    }
++
++    return FALSE;
++}
++
++static BOOL present_image_gdi(struct vmr7_presenter *presenter, IDirectDrawSurface7 *surface)
++{
++    DDSURFACEDESC2 desc = {.dwSize = sizeof(desc)};
++    BITMAPINFO bmi = {{sizeof(BITMAPINFOHEADER)}};
++    BOOL ret = FALSE, converted;
++    HDC src_dc, dst_dc;
++    RECT rect;
++
++    if (!presenter->window || !surface)
++        return FALSE;
++    if (FAILED(IDirectDrawSurface7_GetSurfaceDesc(surface, &desc)))
++        return FALSE;
++
++    if (desc.ddpfPixelFormat.dwFlags & DDPF_RGB)
++    {
++        if (FAILED(IDirectDrawSurface7_GetDC(surface, &src_dc)))
++            return FALSE;
++        if ((dst_dc = GetDC(presenter->window)))
++        {
++            GetClientRect(presenter->window, &rect);
++            SetStretchBltMode(dst_dc, COLORONCOLOR);
++            ret = StretchBlt(dst_dc, 0, 0, rect.right, rect.bottom,
++                    src_dc, 0, 0, desc.dwWidth, desc.dwHeight, SRCCOPY);
++            ReleaseDC(presenter->window, dst_dc);
++        }
++        IDirectDrawSurface7_ReleaseDC(surface, src_dc);
++        return ret;
++    }
++
++    if (!(desc.ddpfPixelFormat.dwFlags & DDPF_FOURCC))
++        return FALSE;
++    if (FAILED(IDirectDrawSurface7_Lock(surface, NULL, &desc, DDLOCK_READONLY | DDLOCK_WAIT, NULL)))
++        return FALSE;
++    converted = convert_yuv_frame(presenter, &desc);
++    IDirectDrawSurface7_Unlock(surface, NULL);
++    if (!converted)
++        return FALSE;
++
++    bmi.bmiHeader.biWidth = presenter->rgb_width;
++    bmi.bmiHeader.biHeight = -(LONG)presenter->rgb_height;
++    bmi.bmiHeader.biPlanes = 1;
++    bmi.bmiHeader.biBitCount = 32;
++    bmi.bmiHeader.biCompression = BI_RGB;
++    if ((dst_dc = GetDC(presenter->window)))
++    {
++        GetClientRect(presenter->window, &rect);
++        SetStretchBltMode(dst_dc, COLORONCOLOR);
++        ret = StretchDIBits(dst_dc, 0, 0, rect.right, rect.bottom, 0, 0,
++                presenter->rgb_width, presenter->rgb_height, presenter->rgb,
++                &bmi, DIB_RGB_COLORS, SRCCOPY) != 0;
++        ReleaseDC(presenter->window, dst_dc);
++    }
++    return ret;
++}
++
++static void attach_clipper(struct vmr7_presenter *presenter)
++{
++    IDirectDrawClipper *clipper;
++    HRESULT hr;
++
++    if (presenter->clipper_set || !presenter->window)
++        return;
++    presenter->clipper_set = TRUE;
++
++    if (FAILED(hr = IDirectDraw7_CreateClipper(presenter->ddraw, 0, &clipper, NULL)))
++    {
++        ERR("Failed to create clipper, hr %#lx.\n", hr);
++        return;
++    }
++    if (FAILED(hr = IDirectDrawClipper_SetHWnd(clipper, 0, presenter->window)))
++        ERR("Failed to set clip window, hr %#lx.\n", hr);
++    if (FAILED(hr = IDirectDrawSurface7_SetClipper(presenter->primary, clipper)))
++        ERR("Failed to set clipper, hr %#lx.\n", hr);
++    IDirectDrawClipper_Release(clipper);
++}
++
+ static HRESULT WINAPI image_presenter_PresentImage(IVMRImagePresenter *iface,
+         DWORD_PTR cookie, VMRPRESENTATIONINFO *info)
+ {
+@@ -125,6 +297,10 @@ static HRESULT WINAPI image_presenter_PresentImage(IVMRImagePresenter *iface,
+     if (info->dwFlags & VMRSample_SrcDstRectsValid)
+         FIXME("Ignoring src/dst rects.\n");
+ 
++    if (present_image_gdi(presenter, info->lpSurf))
++        return S_OK;
++
++    attach_clipper(presenter);
+     GetClientRect(presenter->window, &rect);
+     point.x = point.y = 0;
+     ClientToScreen(presenter->window, &point);
+@@ -358,20 +534,13 @@ static HRESULT WINAPI windowless_control_SetVideoClippingWindow(
+         IVMRWindowlessControl *iface, HWND window)
+ {
+     struct vmr7_presenter *presenter = impl_from_IVMRWindowlessControl(iface);
+-    IDirectDrawClipper *clipper;
+-    HRESULT hr;
+ 
+     TRACE("iface %p, window %p.\n", iface, window);
+ 
+-    if (FAILED(hr = IDirectDraw7_CreateClipper(presenter->ddraw, 0, &clipper, NULL)))
+-        ERR("Failed to create clipper, hr %#lx.\n", hr);
+-    if (FAILED(hr = IDirectDrawClipper_SetHWnd(clipper, 0, window)))
+-        ERR("Failed to set clip window, hr %#lx.\n", hr);
+-    if (FAILED(hr = IDirectDrawSurface7_SetClipper(presenter->primary, clipper)))
+-        ERR("Failed to set clipper, hr %#lx.\n", hr);
+-    IDirectDrawClipper_Release(clipper);
+-
++    /* The clipper is attached on the first frame that cannot be drawn with GDI;
++     * see present_image_gdi(). */
+     presenter->window = window;
++    presenter->clipper_set = FALSE;
+ 
+     return S_OK;
+ }
