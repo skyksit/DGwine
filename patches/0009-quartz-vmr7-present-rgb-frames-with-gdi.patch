@@ -1,0 +1,55 @@
+diff --git a/dlls/quartz/vmr7_presenter.c b/dlls/quartz/vmr7_presenter.c
+index c244c86..413be09 100644
+--- a/dlls/quartz/vmr7_presenter.c
++++ b/dlls/quartz/vmr7_presenter.c
+@@ -105,6 +105,40 @@ static HRESULT WINAPI image_presenter_StopPresenting(IVMRImagePresenter *iface,
+     return E_NOTIMPL;
+ }
+ 
++/* Draw an RGB frame into the clipping window with GDI.
++ *
++ * Blitting to the primary surface makes wined3d attach a GL drawable to the
++ * application's window, and releasing the presenter at the end of the video
++ * destroys that drawable again. A game that draws its own frames into the same
++ * window with GDI is left with a window that no longer shows anything: it keeps
++ * running behind a black screen (Parfait ~Chocolat second brew~ after its
++ * opening movie). Drawing through a DC never touches the window's GL state. */
++static BOOL present_image_gdi(struct vmr7_presenter *presenter, IDirectDrawSurface7 *surface)
++{
++    DDSURFACEDESC2 desc = {.dwSize = sizeof(desc)};
++    HDC src_dc, dst_dc;
++    BOOL ret = FALSE;
++    RECT rect;
++
++    if (!presenter->window || !surface)
++        return FALSE;
++    if (FAILED(IDirectDrawSurface7_GetSurfaceDesc(surface, &desc))
++            || !(desc.ddpfPixelFormat.dwFlags & DDPF_RGB))
++        return FALSE;
++    if (FAILED(IDirectDrawSurface7_GetDC(surface, &src_dc)))
++        return FALSE;
++    if ((dst_dc = GetDC(presenter->window)))
++    {
++        GetClientRect(presenter->window, &rect);
++        SetStretchBltMode(dst_dc, COLORONCOLOR);
++        ret = StretchBlt(dst_dc, 0, 0, rect.right, rect.bottom,
++                src_dc, 0, 0, desc.dwWidth, desc.dwHeight, SRCCOPY);
++        ReleaseDC(presenter->window, dst_dc);
++    }
++    IDirectDrawSurface7_ReleaseDC(surface, src_dc);
++    return ret;
++}
++
+ static HRESULT WINAPI image_presenter_PresentImage(IVMRImagePresenter *iface,
+         DWORD_PTR cookie, VMRPRESENTATIONINFO *info)
+ {
+@@ -125,6 +159,9 @@ static HRESULT WINAPI image_presenter_PresentImage(IVMRImagePresenter *iface,
+     if (info->dwFlags & VMRSample_SrcDstRectsValid)
+         FIXME("Ignoring src/dst rects.\n");
+ 
++    if (present_image_gdi(presenter, info->lpSurf))
++        return S_OK;
++
+     GetClientRect(presenter->window, &rect);
+     point.x = point.y = 0;
+     ClientToScreen(presenter->window, &point);
