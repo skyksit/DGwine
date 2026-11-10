@@ -1,0 +1,147 @@
+diff --git a/dlls/ddraw/ddraw.c b/dlls/ddraw/ddraw.c
+index ed342bf..568a546 100644
+--- a/dlls/ddraw/ddraw.c
++++ b/dlls/ddraw/ddraw.c
+@@ -564,6 +564,29 @@ static HRESULT ddraw_set_focus_window(struct ddraw *ddraw, HWND window)
+     return DD_OK;
+ }
+ 
++/* WINE_DDRAW_WINDOWED_GDI=1: in non-exclusive (windowed) mode, keep the GL
++ * drawable on a hidden window and copy primary surface updates into the
++ * application's window with GDI. Presenting the primary through the swapchain
++ * puts a GL drawable over the whole clipper/cooperative window, which hides
++ * GDI child windows inside it (Gensou Suikoden draws its field with ddraw and
++ * its message and status windows with GDI, all inside one frame window). */
++BOOL ddraw_windowed_gdi_enabled(void)
++{
++    static int enabled = -1;
++
++    if (enabled == -1)
++    {
++        char value[8];
++        DWORD len = GetEnvironmentVariableA("WINE_DDRAW_WINDOWED_GDI", value, sizeof(value));
++
++        enabled = len && len < sizeof(value) && value[0] != '0';
++        if (enabled)
++            FIXME("Copying windowed primary surface updates with GDI (WINE_DDRAW_WINDOWED_GDI).
++");
++    }
++    return enabled;
++}
++
+ static HRESULT ddraw_attach_d3d_device(struct ddraw *ddraw, HWND window,
+         DWORD cooplevel, struct wined3d_swapchain **wined3d_swapchain)
+ {
+@@ -598,6 +621,10 @@ static HRESULT ddraw_attach_d3d_device(struct ddraw *ddraw, HWND window,
+         return wined3d_swapchain_create(ddraw->wined3d_device, &swapchain_desc,
+                 &ddraw->state_parent, NULL, &ddraw_null_wined3d_parent_ops, wined3d_swapchain);
+ 
++    /* Keep the GL drawable off the application's window, see ddraw_windowed_gdi_enabled(). */
++    if (ddraw_windowed_gdi_enabled() && !(cooplevel & DDSCL_EXCLUSIVE))
++        window = NULL;
++
+     if (!window || window == GetDesktopWindow())
+     {
+         window = CreateWindowExA(0, DDRAW_WINDOW_CLASS_NAME, "Hidden D3D Window",
+diff --git a/dlls/ddraw/ddraw_private.h b/dlls/ddraw/ddraw_private.h
+index bd1df8e..366bd79 100644
+--- a/dlls/ddraw/ddraw_private.h
++++ b/dlls/ddraw/ddraw_private.h
+@@ -234,6 +234,7 @@ struct ddraw_texture
+ HRESULT ddraw_surface_create(struct ddraw *ddraw, const DDSURFACEDESC2 *surface_desc,
+         struct ddraw_surface **surface, IUnknown *outer_unknown, unsigned int version);
+ struct wined3d_rendertarget_view *ddraw_surface_get_rendertarget_view(struct ddraw_surface *surface);
++BOOL ddraw_windowed_gdi_enabled(void);
+ HRESULT ddraw_surface_update_frontbuffer(struct ddraw_surface *surface,
+         const RECT *rect, BOOL read, unsigned int swap_interval);
+ 
+diff --git a/dlls/ddraw/surface.c b/dlls/ddraw/surface.c
+index 545c767..89de326 100644
+--- a/dlls/ddraw/surface.c
++++ b/dlls/ddraw/surface.c
+@@ -58,6 +58,63 @@ static BOOL ddraw_gdi_is_front(struct ddraw *ddraw)
+  * applications from drawing to the screen while we've locked the frontbuffer.
+  * We'd like to do this in wined3d instead, but for that to work wined3d needs
+  * to support windowless rendering first. */
++/* Copy a primary surface update to or from the application's window with
++ * GDI, see ddraw_windowed_gdi_enabled(). The windowed primary surface uses
++ * screen coordinates. */
++static HRESULT ddraw_surface_update_window_gdi(struct ddraw_surface *surface,
++        struct wined3d_texture *wined3d_texture, int x, int y, int w, int h, BOOL read)
++{
++    struct ddraw *ddraw = surface->ddraw;
++    POINT origin = {0, 0};
++    HWND window = NULL;
++    HDC surface_dc, dst_dc;
++    HRESULT hr;
++    BOOL ret;
++
++    if (surface->clipper && ddraw_clipper_is_valid(surface->clipper))
++        window = surface->clipper->window;
++    if (!window)
++        window = ddraw->dest_window;
++    if (window && !IsWindow(window))
++        window = NULL;
++
++    if (FAILED(hr = wined3d_texture_get_dc(wined3d_texture, surface->sub_resource_idx, &surface_dc)))
++    {
++        ERR("Failed to get surface DC, hr %#lx.
++", hr);
++        return hr;
++    }
++    if (surface->palette)
++        wined3d_palette_apply_to_dc(surface->palette->wined3d_palette, surface_dc);
++
++    if (window)
++        ClientToScreen(window, &origin);
++    if (!(dst_dc = GetDC(window)))
++    {
++        wined3d_texture_release_dc(wined3d_texture, surface->sub_resource_idx, surface_dc);
++        ERR("Failed to get window DC.
++");
++        return E_FAIL;
++    }
++
++    if (read)
++        ret = BitBlt(surface_dc, x, y, w, h, dst_dc, x - origin.x, y - origin.y, SRCCOPY);
++    else
++        ret = BitBlt(dst_dc, x - origin.x, y - origin.y, w, h, surface_dc, x, y, SRCCOPY);
++
++    ReleaseDC(window, dst_dc);
++    wined3d_texture_release_dc(wined3d_texture, surface->sub_resource_idx, surface_dc);
++
++    if (!ret)
++    {
++        ERR("Failed to blit to/from window %p.
++", window);
++        return E_FAIL;
++    }
++
++    return DD_OK;
++}
++
+ HRESULT ddraw_surface_update_frontbuffer(struct ddraw_surface *surface,
+         const RECT *rect, BOOL read, unsigned int swap_interval)
+ {
+@@ -122,6 +179,10 @@ HRESULT ddraw_surface_update_frontbuffer(struct ddraw_surface *surface,
+      * This affects the "Deer Hunter" demo, which uses a popup window and GDI
+      * draws to draw part of the user interface. See also the "fswindow"
+      * sample is the DirectX 7 SDK. */
++    if (ddraw_windowed_gdi_enabled() && !(ddraw->cooperative_level & DDSCL_EXCLUSIVE))
++        return ddraw_surface_update_window_gdi(surface, ddraw_surface_get_default_texture(surface,
++                read ? (rect ? DDRAW_SURFACE_RW : DDRAW_SURFACE_WRITE) : DDRAW_SURFACE_READ), x, y, w, h, read);
++
+     if (ddraw->swapchain_window && (!(ddraw->cooperative_level & DDSCL_EXCLUSIVE)
+             || ddraw->swapchain_window == GetForegroundWindow() || ddraw_gdi_is_front(ddraw)))
+     {
+@@ -4637,7 +4698,9 @@ static HRESULT WINAPI ddraw_surface7_SetClipper(IDirectDrawSurface7 *iface,
+ 
+         if (clipWindow)
+         {
+-            wined3d_swapchain_set_window(This->ddraw->wined3d_swapchain, clipWindow);
++            /* Keep the GL drawable off the application's window, see ddraw_windowed_gdi_enabled(). */
++            if (!ddraw_windowed_gdi_enabled() || (This->ddraw->cooperative_level & DDSCL_EXCLUSIVE))
++                wined3d_swapchain_set_window(This->ddraw->wined3d_swapchain, clipWindow);
+             ddraw_set_swapchain_window(This->ddraw, clipWindow);
+         }
+         else

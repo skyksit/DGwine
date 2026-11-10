@@ -193,3 +193,27 @@ path an XIM commit takes — so it arrives as a real IME result (`WM_IME_COMPOSI
 
 Going through the IME matters: Diablo II reads Korean only via `ImmGetCompositionStringA`. A bare
 `SendInput(KEYEVENTF_UNICODE)` reached its chat box as `WM_CHAR` and came out as `????`.
+
+## ddraw: windowed primary updates copied with GDI (patches-winlator/0003)
+
+Built by `build-winlator-ntdll.yml` on Winlator's own tree and shipped as
+`lib/wine/i386-windows/ddraw.dll` (+ the x86_64 one). Unlike quartz, ddraw imports wined3d, whose
+interface is internal and changes between releases, so it must come from the container's base tree.
+
+**Opt-in**: the patch does nothing unless the game's environment has `WINE_DDRAW_WINDOWED_GDI=1`
+(`envVars=` in `dgplayer.ini`). With it, in non-exclusive (windowed) cooperative mode ddraw
+
+- creates its wined3d swapchain on a hidden window instead of the application's window,
+- does not move the swapchain to the clipper window in `SetClipper`, and
+- copies every primary-surface update into the clipper window (or the cooperative window) with
+  `GetDC` + `BitBlt`, translating the primary's screen coordinates into client coordinates.
+
+Without it, ddraw presents the windowed primary through the swapchain, which puts a GL drawable over
+the whole clipper window. Gensou Suikoden (Konami, 1998, Korean PC release) draws its field with
+ddraw/Direct3D and its message and party windows with GDI as children of one frame window: under GL
+the field covered the whole frame and the message window never showed; under Vulkan the frame layout
+was right but the field stayed black. `renderer=gdi` is not an option there because the game creates
+a Direct3D device at start-up (`ZddLib: DirectDraw Failed(D3Ddev2)`).
+
+Exclusive (fullscreen) mode is untouched. The copy goes through `wined3d_texture_get_dc`, i.e. a
+read-back per update — fine for 640x480 at 30 fps, not meant for fast 3D games.

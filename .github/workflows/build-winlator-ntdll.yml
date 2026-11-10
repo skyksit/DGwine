@@ -1,4 +1,4 @@
-name: Build Winlator ntdll (game speed) + winex11 (Unicode text)
+name: Build Winlator ntdll (game speed) + winex11 (Unicode text) + ddraw (windowed GDI)
 
 # Separate from "Build Wine modules" on purpose: that one builds **upstream** Wine, this one cannot.
 # The container's Wine carries esync, which has never been upstream in any release, and ntdll is the
@@ -102,10 +102,15 @@ jobs:
           echo "wine tree: $SRC"
           # winex11.so carries patch 0002 (Unicode keysyms committed as IME text). Only its unix half
           # changes - no new unixlib entry points - so the container's PE winex11.drv stays as is.
+          # ddraw.dll carries patch 0003 (windowed primary updates copied with GDI). It imports
+          # wined3d, whose interface is internal and changes between releases - which is why it is
+          # built here, on the container's own tree, and not on upstream like quartz.
           for f in i386-windows/ntdll.dll \
                    x86_64-windows/ntdll.dll \
                    x86_64-unix/ntdll.so \
-                   x86_64-unix/winex11.so; do
+                   x86_64-unix/winex11.so \
+                   i386-windows/ddraw.dll \
+                   x86_64-windows/ddraw.dll; do
             install -D "$SRC/$f" "out/lib/wine/$f"
           done
 
@@ -117,6 +122,8 @@ jobs:
           # go into an APK asset.
           i686-w64-mingw32-strip   --strip-debug out/lib/wine/i386-windows/ntdll.dll
           x86_64-w64-mingw32-strip --strip-debug out/lib/wine/x86_64-windows/ntdll.dll
+          i686-w64-mingw32-strip   --strip-debug out/lib/wine/i386-windows/ddraw.dll
+          x86_64-w64-mingw32-strip --strip-debug out/lib/wine/x86_64-windows/ddraw.dll
           strip --strip-debug out/lib/wine/x86_64-unix/ntdll.so
           strip --strip-debug out/lib/wine/x86_64-unix/winex11.so
           strip --strip-debug out/bin/wineserver
@@ -144,6 +151,15 @@ jobs:
               || { echo "::error::winex11.so lacks $sym - a feature the shipped one has"; exit 1; }
           done
           echo "OK winex11.so"
+
+      - name: Gate 1c - the windowed-GDI patch is in ddraw.dll
+        run: |
+          # The environment variable patch 0003 looks up.
+          for f in out/lib/wine/i386-windows/ddraw.dll out/lib/wine/x86_64-windows/ddraw.dll; do
+            grep -aq 'WINE_DDRAW_WINDOWED_GDI' "$f" \
+              || { echo "::error::$f does not contain WINE_DDRAW_WINDOWED_GDI - patch did not land"; exit 1; }
+            echo "OK $f"
+          done
 
       - name: Gate 2 - esync survived the build
         run: |
