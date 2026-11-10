@@ -1,8 +1,8 @@
 diff --git a/dlls/ddraw/ddraw.c b/dlls/ddraw/ddraw.c
-index ed342bf..568a546 100644
+index ed342bf..ef4d3b5 100644
 --- a/dlls/ddraw/ddraw.c
 +++ b/dlls/ddraw/ddraw.c
-@@ -564,6 +564,29 @@ static HRESULT ddraw_set_focus_window(struct ddraw *ddraw, HWND window)
+@@ -564,6 +564,28 @@ static HRESULT ddraw_set_focus_window(struct ddraw *ddraw, HWND window)
      return DD_OK;
  }
  
@@ -23,8 +23,7 @@ index ed342bf..568a546 100644
 +
 +        enabled = len && len < sizeof(value) && value[0] != '0';
 +        if (enabled)
-+            FIXME("Copying windowed primary surface updates with GDI (WINE_DDRAW_WINDOWED_GDI).
-+");
++            FIXME("Copying windowed primary surface updates with GDI (WINE_DDRAW_WINDOWED_GDI).\n");
 +    }
 +    return enabled;
 +}
@@ -32,7 +31,7 @@ index ed342bf..568a546 100644
  static HRESULT ddraw_attach_d3d_device(struct ddraw *ddraw, HWND window,
          DWORD cooplevel, struct wined3d_swapchain **wined3d_swapchain)
  {
-@@ -598,6 +621,10 @@ static HRESULT ddraw_attach_d3d_device(struct ddraw *ddraw, HWND window,
+@@ -598,6 +620,10 @@ static HRESULT ddraw_attach_d3d_device(struct ddraw *ddraw, HWND window,
          return wined3d_swapchain_create(ddraw->wined3d_device, &swapchain_desc,
                  &ddraw->state_parent, NULL, &ddraw_null_wined3d_parent_ops, wined3d_swapchain);
  
@@ -56,10 +55,10 @@ index bd1df8e..366bd79 100644
          const RECT *rect, BOOL read, unsigned int swap_interval);
  
 diff --git a/dlls/ddraw/surface.c b/dlls/ddraw/surface.c
-index 545c767..89de326 100644
+index 545c767..21591c5 100644
 --- a/dlls/ddraw/surface.c
 +++ b/dlls/ddraw/surface.c
-@@ -58,6 +58,63 @@ static BOOL ddraw_gdi_is_front(struct ddraw *ddraw)
+@@ -58,6 +58,60 @@ static BOOL ddraw_gdi_is_front(struct ddraw *ddraw)
   * applications from drawing to the screen while we've locked the frontbuffer.
   * We'd like to do this in wined3d instead, but for that to work wined3d needs
   * to support windowless rendering first. */
@@ -85,8 +84,7 @@ index 545c767..89de326 100644
 +
 +    if (FAILED(hr = wined3d_texture_get_dc(wined3d_texture, surface->sub_resource_idx, &surface_dc)))
 +    {
-+        ERR("Failed to get surface DC, hr %#lx.
-+", hr);
++        ERR("Failed to get surface DC, hr %#lx.\n", hr);
 +        return hr;
 +    }
 +    if (surface->palette)
@@ -97,8 +95,7 @@ index 545c767..89de326 100644
 +    if (!(dst_dc = GetDC(window)))
 +    {
 +        wined3d_texture_release_dc(wined3d_texture, surface->sub_resource_idx, surface_dc);
-+        ERR("Failed to get window DC.
-+");
++        ERR("Failed to get window DC.\n");
 +        return E_FAIL;
 +    }
 +
@@ -112,8 +109,7 @@ index 545c767..89de326 100644
 +
 +    if (!ret)
 +    {
-+        ERR("Failed to blit to/from window %p.
-+", window);
++        ERR("Failed to blit to/from window %p.\n", window);
 +        return E_FAIL;
 +    }
 +
@@ -123,7 +119,7 @@ index 545c767..89de326 100644
  HRESULT ddraw_surface_update_frontbuffer(struct ddraw_surface *surface,
          const RECT *rect, BOOL read, unsigned int swap_interval)
  {
-@@ -122,6 +179,10 @@ HRESULT ddraw_surface_update_frontbuffer(struct ddraw_surface *surface,
+@@ -122,6 +176,10 @@ HRESULT ddraw_surface_update_frontbuffer(struct ddraw_surface *surface,
       * This affects the "Deer Hunter" demo, which uses a popup window and GDI
       * draws to draw part of the user interface. See also the "fswindow"
       * sample is the DirectX 7 SDK. */
@@ -134,7 +130,7 @@ index 545c767..89de326 100644
      if (ddraw->swapchain_window && (!(ddraw->cooperative_level & DDSCL_EXCLUSIVE)
              || ddraw->swapchain_window == GetForegroundWindow() || ddraw_gdi_is_front(ddraw)))
      {
-@@ -4637,7 +4698,9 @@ static HRESULT WINAPI ddraw_surface7_SetClipper(IDirectDrawSurface7 *iface,
+@@ -4637,7 +4695,9 @@ static HRESULT WINAPI ddraw_surface7_SetClipper(IDirectDrawSurface7 *iface,
  
          if (clipWindow)
          {
